@@ -7,6 +7,9 @@ Game (from /docs and probing the API):
                -> {"solved": true, "moves": n, "score": s, "Optimal Moves": k, "recorded": true}
   GET  /timer  -> "Next reset in MM:SS\nRound N\nPeriod 10 minutes"
 
+Scoring (observed): score ~= 120 * "Optimal Moves" / moves, e.g. 100 moves -> 5 pts,
+18 moves vs. optimal 20 -> 133 pts. The scoreboard TOTAL sums every recorded submission.
+
 Fewer moves = more points, so the bot searches for the shortest solution it can find
 (Kociemba two-phase, iteratively tightening the length bound) within a time budget,
 verifies it locally and submits once per round.
@@ -140,8 +143,8 @@ def main():
     ap.add_argument("--team", required=True)
     ap.add_argument("--loop", action="store_true", help="play every round until interrupted")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--budget", type=float, default=240, help="max solve time per round in seconds")
-    ap.add_argument("--min-len", type=int, default=16, help="stop searching below this length")
+    ap.add_argument("--budget", type=float, default=480, help="max solve time per round in seconds")
+    ap.add_argument("--min-len", type=int, default=12, help="stop searching below this length")
     ap.add_argument("--safety", type=float, default=20, help="seconds to keep before round end")
     ap.add_argument("--table-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tables"))
     args = ap.parse_args()
