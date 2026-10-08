@@ -20,6 +20,10 @@ Usage:
   python cube_bot.py --team claudine --loop     # keep going, once per round
   python cube_bot.py --team claudine --dry-run  # solve only, don't submit
 
+Optional, much stronger (finds 17/18-move solutions more often):
+  git clone https://github.com/efrantar/rob-twophase && make -C rob-twophase
+  python cube_bot.py --team claudine --loop --rob rob-twophase/twophase
+
 The first run builds the solver's lookup tables (~ several minutes, cached in --table-dir).
 """
 import argparse
@@ -64,31 +68,66 @@ def apply_moves(cube, moves):
 
 
 # ---------------------------------------------------------------- solving
-def solve(scramble, budget, min_len=0, verbose=True):
+ROB = None  # (binary, table_dir) for rob-twophase, set from the command line
+
+
+def rob_solve(facelets, seconds, threads):
+    """Best solution rob-twophase finds in `seconds` (it always uses the full time)."""
+    import subprocess
+    binary, table_dir = ROB
+    p = subprocess.Popen([binary, "-t", str(threads), "-m", str(int(seconds * 1000)), "-l", "-1"],
+                         cwd=table_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        p.stdin.write(f"solve {facelets}\n")
+        p.stdin.flush()
+        timed = False
+        for line in p.stdout:
+            line = line.strip()
+            if timed:
+                m = re.fullmatch(r"(.*)\((\d+)\)", line)
+                return parse_moves(m.group(1)) if m else None
+            if "error" in line.lower():
+                raise RuntimeError("rob-twophase: " + line)
+            timed = line.endswith("ms")
+    finally:
+        p.kill()
+
+
+def solve(scramble, budget, min_len=0, verbose=True, threads=4):
     """Shortest solution found within `budget` seconds, as a list of moves."""
     import twophase.solver as sv
     from twophase.cubie import CubieCube
 
     state = apply_moves(CubieCube(), parse_moves(scramble))
     facelets = state.to_facelet_cube().to_string()
+    t0 = time.monotonic()
+    deadline = t0 + budget
+    log = lambda msg: verbose and print(f"  {msg} after {time.monotonic() - t0:.1f}s")
 
-    deadline = time.monotonic() + budget
-    best = None
-    target = 20
-    while target >= min_len:
-        left = deadline - time.monotonic()
-        if left <= 1:
-            break
-        res = sv.solve(facelets, target, left)
-        if "Error" in res:
-            raise RuntimeError(res)
-        sol = parse_moves(res.split("(")[0])
-        if best is not None and len(sol) >= len(best):
-            break  # timed out without improving
-        best = sol
-        if verbose:
-            print(f"  found {len(best)} moves after {budget - (deadline - time.monotonic()):.1f}s")
+    # quick fallback (~20 moves within a fraction of a second)
+    best = parse_moves(sv.solve(facelets, 20, 1).split("(")[0])
+    log(f"found {len(best)} moves")
+
+    if ROB:
+        # rob-twophase: multithreaded C++, searches the remaining time for the shortest solution
+        left = deadline - time.monotonic() - 3  # table loading
+        if left > 1:
+            sol = rob_solve(facelets, left, threads)
+            if sol and len(sol) < len(best):
+                best = sol
+            log(f"rob-twophase: {len(sol) if sol else '-'} moves")
+    else:
         target = len(best) - 1
+        while target >= min_len:
+            left = deadline - time.monotonic()
+            if left <= 1:
+                break
+            sol = parse_moves(sv.solve(facelets, target, left).split("(")[0])
+            if len(sol) >= len(best):
+                break  # timed out without improving
+            best = sol
+            log(f"found {len(best)} moves")
+            target = len(best) - 1
 
     # verify locally before sending anything
     check = apply_moves(CubieCube(), parse_moves(scramble))
@@ -123,7 +162,7 @@ def play_round(s, args):
     scramble = get_scramble(s)
     print(f"Round {rnd}: {remaining}s left, scramble has {len(scramble.split())} moves")
     budget = max(5, min(args.budget, remaining - args.safety))
-    best = solve(scramble, budget, args.min_len)
+    best = solve(scramble, budget, args.min_len, threads=args.threads)
     sol = fmt_moves(best)
     print(f"  solution ({len(best)}): {sol}")
 
@@ -146,11 +185,18 @@ def main():
     ap.add_argument("--budget", type=float, default=480, help="max solve time per round in seconds")
     ap.add_argument("--min-len", type=int, default=12, help="stop searching below this length")
     ap.add_argument("--safety", type=float, default=20, help="seconds to keep before round end")
+    ap.add_argument("--rob", help="path to a compiled rob-twophase binary (github.com/efrantar/rob-twophase)")
+    ap.add_argument("--threads", type=int, default=os.cpu_count() or 4, help="threads for rob-twophase")
     ap.add_argument("--table-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tables"))
     args = ap.parse_args()
 
     # twophase stores/loads its tables in ./twophase relative to the cwd
+    global ROB
     os.makedirs(args.table_dir, exist_ok=True)
+    if args.rob:
+        rob_dir = os.path.join(args.table_dir, "rob")  # rob-twophase writes its 676MB table here on first run
+        os.makedirs(rob_dir, exist_ok=True)
+        ROB = (os.path.abspath(args.rob), rob_dir)
     os.chdir(args.table_dir)
     print("loading solver tables (first run builds them, takes a while)...")
     import twophase.solver  # noqa: F401  (triggers table load/generation)
